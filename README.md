@@ -26,19 +26,16 @@ composer install
 
 # 2. Configure environment
 cp .env.example .env
-# Edit .env with your PostgreSQL credentials
+# Edit .env with your database credentials (default: herd/rollup)
 
-# 3. Create database
-createdb rollup_game
-
-# 4. Run migrations
+# 3. Run migrations
 php artisan migrate
 
-# 5. Start server
-php -S localhost:8000 -t public
+# 4. Access via Laravel Herd
+# Herd automatically serves at: http://rollup-game-service.test
 
-# 6. Test API
-curl http://localhost:8000/api/health
+# 5. Test API
+curl http://rollup-game-service.test/api/health
 ```
 
 ---
@@ -181,18 +178,34 @@ tests/                                # Pest PHP tests
 
 ## Deployment
 
-### PostgreSQL Setup
-You'll need to configure PostgreSQL credentials in your `.env` file and create the database:
+### Local Development with Laravel Herd
+
+This project is configured for [Laravel Herd](https://herd.laravel.com/):
 
 ```bash
-# Create database
-createdb rollup_game
-
-# Or using psql
-psql -U postgres -c "CREATE DATABASE rollup_game;"
+# Database is already configured for Herd
+# Default: DB=rollup, User=herd
 
 # Run migrations
 php artisan migrate
+
+# Access at: http://rollup-game-service.test
+```
+
+### Production PostgreSQL Setup
+
+For production deployment:
+
+```bash
+# Create database
+createdb rollup
+
+# Or using psql
+psql -U postgres -c "CREATE DATABASE rollup;"
+
+# Update .env with production credentials
+# Run migrations
+php artisan migrate --force
 ```
 
 ### Laravel Cloud (Recommended)
