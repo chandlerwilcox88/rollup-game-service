@@ -19,16 +19,16 @@ class GameController extends BaseController
     /**
      * Health check endpoint
      *
-     * @return JsonResponse
+     * @return array
      */
-    public function health(): JsonResponse
+    public function health(): array
     {
-        return response()->json([
+        return [
             'status' => 'ok',
             'service' => 'Roll Up Game Service',
             'version' => '1.0.0',
             'timestamp' => now()->toIso8601String(),
-        ]);
+        ];
     }
 
     /**

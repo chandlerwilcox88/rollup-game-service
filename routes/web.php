@@ -15,11 +15,11 @@
 
 // Home route
 $router->get('/', function () use ($router) {
-    return response()->json([
+    return [
         'service' => 'Roll Up Game Service',
         'version' => '1.0.0',
         'docs' => '/api/health',
-    ]);
+    ];
 });
 
 // API Routes
