@@ -22,8 +22,8 @@ $router->get('/', function () use ($router) {
     ];
 });
 
-// API Routes
-$router->group(['prefix' => 'api'], function () use ($router) {
+// API Routes - All protected with API key authentication
+$router->group(['prefix' => 'api', 'middleware' => 'api.key'], function () use ($router) {
     // Health check
     $router->get('/health', 'GameController@health');
 

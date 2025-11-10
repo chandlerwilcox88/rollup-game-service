@@ -84,9 +84,43 @@ Every dice roll is verifiable using cryptography. The server cannot cheat, and y
 
 ### Base URL
 ```
-Development: http://localhost:8000
+Development: http://rollup-game-service.test
 Production: https://rollup.laravel.cloud
 ```
+
+### Authentication
+
+🔐 **All API endpoints require authentication**
+
+The API uses API key authentication with domain verification. Only requests from `openluxe.test` or `openluxe.co` with a valid API key will be accepted.
+
+#### Headers Required
+
+```http
+X-API-Key: your-api-key-here
+```
+
+Or using Bearer token:
+
+```http
+Authorization: Bearer your-api-key-here
+```
+
+#### Example Request
+
+```bash
+curl -H "X-API-Key: YOUR_API_KEY" \
+     http://rollup-game-service.test/api/health
+```
+
+#### Response Codes
+- `200` - Success
+- `401` - Missing API key
+- `403` - Invalid API key or unauthorized domain
+
+**Note**: The API key is configured in `.env` as `API_KEY_OPENLUXE`
+
+---
 
 ### Key Endpoints
 

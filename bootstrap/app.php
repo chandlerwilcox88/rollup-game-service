@@ -82,6 +82,7 @@ $app->configure('cors');
 
 $app->routeMiddleware([
     'auth' => App\Http\Middleware\Authenticate::class,
+    'api.key' => App\Http\Middleware\ApiKeyAuth::class,
 ]);
 
 /*
