@@ -27,6 +27,14 @@ $app->withFacades();
 
 $app->withEloquent();
 
+// Bind ResponseFactory for Lumen (required for response()->json())
+$app->singleton(
+    Illuminate\Contracts\Routing\ResponseFactory::class,
+    function ($app) {
+        return new Laravel\Lumen\Http\ResponseFactory();
+    }
+);
+
 /*
 |--------------------------------------------------------------------------
 | Register Container Bindings
