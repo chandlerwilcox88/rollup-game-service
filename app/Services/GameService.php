@@ -26,7 +26,8 @@ class GameService
     public function __construct(
         private ProvablyFairService $provablyFairService,
         private ScoringService $scoringService,
-        private GameTypeRegistry $gameTypeRegistry
+        private GameTypeRegistry $gameTypeRegistry,
+        private TurnStateManager $turnStateManager
     ) {}
 
     /**
@@ -203,6 +204,179 @@ class GameService
                 'bonus_descriptions' => $bonusDescriptions,
                 'player_total_score' => $player->fresh()->total_score,
                 'nonce' => $baseNonce,
+            ];
+        });
+    }
+
+    /**
+     * Hold dice (Roll Up action)
+     * Set aside scoring dice and update turn state
+     *
+     * @param Game $game
+     * @param int $userId
+     * @param array $heldDiceIndices Indices of dice to hold from available_dice
+     * @return array
+     */
+    public function holdDice(Game $game, int $userId, array $heldDiceIndices): array
+    {
+        return DB::transaction(function () use ($game, $userId, $heldDiceIndices) {
+            // Verify it's this player's turn
+            if (!$game->currentPlayer || $game->currentPlayer->user_id !== $userId) {
+                throw new \Exception('Not your turn');
+            }
+
+            // Get turn state
+            $turnState = $this->turnStateManager->getTurnState($game);
+            if (!($turnState['can_hold'] ?? false)) {
+                throw new \Exception('Cannot hold dice at this time');
+            }
+
+            // Get available dice
+            $availableDice = $turnState['available_dice'] ?? [];
+
+            // Extract the dice values at the specified indices
+            $heldDiceValues = [];
+            foreach ($heldDiceIndices as $index) {
+                if (!isset($availableDice[$index])) {
+                    throw new \Exception("Invalid dice index: {$index}");
+                }
+                $heldDiceValues[] = $availableDice[$index];
+            }
+
+            // Validate that held dice form a scoring combo
+            // TODO: Add more sophisticated validation using RollUpGameType
+            if (empty($heldDiceValues)) {
+                throw new \Exception('Must select at least one die to hold');
+            }
+
+            // Calculate score for held dice
+            $gameTypeImpl = $this->gameTypeRegistry->getById($game->game_type_id);
+
+            // For now, use a simplified scoring (just the best combo from those dice)
+            // Pad to 7 dice for RollUpGameType (6 held + special die from last roll)
+            $specialDie = $turnState['special_die'] ?? 1; // Default positive if not set
+            $paddedDice = array_merge($heldDiceValues, array_fill(0, 6 - count($heldDiceValues), 0));
+            $paddedDice[] = $specialDie;
+
+            $scoreData = $gameTypeImpl->calculateScore(array_slice($paddedDice, 0, 7), [
+                'game' => $game,
+                'player' => $game->currentPlayer,
+                'evaluating_held_dice' => true,
+            ]);
+
+            $scoreFromHeldDice = $scoreData['best_combination']['points'];
+
+            // Update turn state
+            $updatedTurnState = $this->turnStateManager->afterHold(
+                $game,
+                $heldDiceValues,
+                $scoreFromHeldDice
+            );
+
+            return [
+                'held_dice' => $heldDiceValues,
+                'score_added' => $scoreFromHeldDice,
+                'pending_score' => $updatedTurnState['pending_score'],
+                'turn_state' => $updatedTurnState,
+            ];
+        });
+    }
+
+    /**
+     * Bank points (Roll Up action)
+     * End turn and add pending score to player's total
+     *
+     * @param Game $game
+     * @param int $userId
+     * @param int|null $targetPlayerId For negative points assignment
+     * @return array
+     */
+    public function bankPoints(Game $game, int $userId, ?int $targetPlayerId = null): array
+    {
+        return DB::transaction(function () use ($game, $userId, $targetPlayerId) {
+            // Verify it's this player's turn
+            if (!$game->currentPlayer || $game->currentPlayer->user_id !== $userId) {
+                throw new \Exception('Not your turn');
+            }
+
+            // Get turn state
+            $turnState = $this->turnStateManager->getTurnState($game);
+            if (!($turnState['can_bank'] ?? false)) {
+                throw new \Exception('Cannot bank at this time');
+            }
+
+            $pendingScore = $turnState['pending_score'] ?? 0;
+            $specialDiePositive = $turnState['special_die_positive'] ?? true;
+            $player = $game->currentPlayer;
+
+            // Determine where points go
+            if ($specialDiePositive) {
+                // Positive: add to current player
+                $player->increment('total_score', $pendingScore);
+                $targetPlayer = null;
+            } else {
+                // Negative: subtract from target player
+                if (!$targetPlayerId) {
+                    throw new \Exception('Must select a player to assign negative points');
+                }
+
+                $targetPlayer = $game->players()->where('user_id', $targetPlayerId)->firstOrFail();
+
+                if ($targetPlayer->id === $player->id) {
+                    throw new \Exception('Cannot assign negative points to yourself');
+                }
+
+                // Subtract from target (don't go below 0)
+                $targetPlayer->total_score = max(0, $targetPlayer->total_score - $pendingScore);
+                $targetPlayer->save();
+            }
+
+            // Save the roll as a "bank" action
+            $rollData = [
+                'game_id' => $game->id,
+                'game_player_id' => $player->id,
+                'round_number' => $game->current_round,
+                'turn_number' => $turnState['turn_number'] ?? 1,
+                'roll_sequence' => ($turnState['turn_roll_count'] ?? 0) + 1,
+                'dice_values' => $turnState['held_dice'] ?? [],
+                'held_dice' => $turnState['held_dice'] ?? [],
+                'available_dice' => [],
+                'nonce' => 0, // Bank action doesn't involve dice roll
+                'dice1_value' => 0,
+                'dice2_value' => 0,
+                'roll_total' => $pendingScore,
+                'bonus_points' => 0,
+                'total_points' => $specialDiePositive ? $pendingScore : 0,
+                'pending_score' => 0,
+                'is_bust' => false,
+                'action_type' => 'bank',
+                'target_player_id' => $targetPlayer->id ?? null,
+            ];
+
+            PlayerRoll::create($rollData);
+
+            // Mark turn as banked
+            $this->turnStateManager->bankScore($game);
+
+            // Advance to next player
+            $nextPlayer = $this->turnStateManager->advanceToNextPlayer($game);
+
+            // Check if round is complete
+            $this->checkRoundCompletion($game);
+
+            return [
+                'banked_score' => $pendingScore,
+                'special_die_positive' => $specialDiePositive,
+                'target_player' => $targetPlayer ? [
+                    'user_id' => $targetPlayer->user_id,
+                    'username' => $targetPlayer->username,
+                    'new_total_score' => $targetPlayer->total_score,
+                ] : null,
+                'player_total_score' => $player->fresh()->total_score,
+                'next_player' => [
+                    'user_id' => $nextPlayer->user_id,
+                    'username' => $nextPlayer->username,
+                ],
             ];
         });
     }

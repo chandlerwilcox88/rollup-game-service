@@ -24,7 +24,6 @@ class GameTypeRegistry
         // Future game types will be added here:
         // 'yahtzee' => YahtzeeGameType::class,
         // 'liars-dice' => LiarsDiceGameType::class,
-        // 'farkle' => FarkleGameType::class,
     ];
 
     /**

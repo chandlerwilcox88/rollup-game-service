@@ -21,6 +21,8 @@ class Game extends Model
         'server_seed_hash',
         'total_rounds',
         'current_round',
+        'current_player_id',
+        'turn_state',
         'turn_time_limit',
         'settings',
         'game_config',
@@ -31,10 +33,12 @@ class Game extends Model
     protected $casts = [
         'settings' => 'array',
         'game_config' => 'array',
+        'turn_state' => 'array',
         'started_at' => 'datetime',
         'completed_at' => 'datetime',
         'total_rounds' => 'integer',
         'current_round' => 'integer',
+        'current_player_id' => 'integer',
         'turn_time_limit' => 'integer',
         'game_type_id' => 'integer',
     ];
@@ -57,6 +61,14 @@ class Game extends Model
     public function players()
     {
         return $this->hasMany(GamePlayer::class, 'game_id');
+    }
+
+    /**
+     * Get the current player (for turn-based games like Roll Up)
+     */
+    public function currentPlayer()
+    {
+        return $this->belongsTo(GamePlayer::class, 'current_player_id');
     }
 
     /**

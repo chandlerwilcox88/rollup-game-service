@@ -125,7 +125,8 @@ class GameController extends BaseController
     {
         $this->validate($request, [
             'user_id' => 'required|integer',
-            'action' => 'required|string|in:roll',
+            'action' => 'required|string|in:roll,hold,bank',
+            'data' => 'nullable|array',
         ]);
 
         try {
@@ -140,6 +141,7 @@ class GameController extends BaseController
 
             $userId = $request->input('user_id');
             $action = $request->input('action');
+            $data = $request->input('data', []);
 
             if ($action === 'roll') {
                 $result = $this->gameService->rollDice($game, $userId);
@@ -149,6 +151,45 @@ class GameController extends BaseController
                     'message' => 'Dice rolled successfully',
                     'data' => [
                         'action' => 'roll',
+                        'round' => $game->current_round,
+                        ...$result,
+                    ],
+                ]);
+            }
+
+            if ($action === 'hold') {
+                // Validate hold data
+                if (!isset($data['held_dice_indices']) || !is_array($data['held_dice_indices'])) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'held_dice_indices is required and must be an array',
+                    ], 400);
+                }
+
+                $result = $this->gameService->holdDice($game, $userId, $data['held_dice_indices']);
+
+                return response()->json([
+                    'success' => true,
+                    'message' => 'Dice held successfully',
+                    'data' => [
+                        'action' => 'hold',
+                        'round' => $game->current_round,
+                        ...$result,
+                    ],
+                ]);
+            }
+
+            if ($action === 'bank') {
+                // For negative scores, need target_player_id
+                $targetPlayerId = $data['target_player_id'] ?? null;
+
+                $result = $this->gameService->bankPoints($game, $userId, $targetPlayerId);
+
+                return response()->json([
+                    'success' => true,
+                    'message' => 'Points banked successfully',
+                    'data' => [
+                        'action' => 'bank',
                         'round' => $game->current_round,
                         ...$result,
                     ],
@@ -165,6 +206,13 @@ class GameController extends BaseController
                 'Player has already rolled in this round',
                 'Player not found',
                 'Invalid player',
+                'Not your turn',
+                'Cannot hold dice at this time',
+                'Cannot bank at this time',
+                'Invalid dice index',
+                'Must select at least one die',
+                'Must select a player to assign negative points',
+                'Cannot assign negative points to yourself',
             ];
 
             $isClientError = false;
