@@ -3,7 +3,9 @@
 namespace App\Http\Controllers;
 
 use App\Models\Game;
+use App\Models\GameType;
 use App\Services\GameService;
+use App\Services\GameTypeRegistry;
 use App\Services\ProvablyFairService;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
@@ -13,7 +15,8 @@ class GameController extends BaseController
 {
     public function __construct(
         private GameService $gameService,
-        private ProvablyFairService $provablyFairService
+        private ProvablyFairService $provablyFairService,
+        private GameTypeRegistry $gameTypeRegistry
     ) {}
 
     /**
@@ -43,6 +46,7 @@ class GameController extends BaseController
     {
         $this->validate($request, [
             'room_code' => 'required|string|max:8',
+            'game_type' => 'nullable|string|max:50', // Optional, defaults to 'roll-up'
             'players' => 'required|array|min:2|max:6',
             'players.*.id' => 'required|integer',
             'players.*.username' => 'required|string|max:255',
@@ -57,7 +61,8 @@ class GameController extends BaseController
             $game = $this->gameService->createGame(
                 $request->input('room_code'),
                 $request->input('players'),
-                $request->input('settings', [])
+                $request->input('settings', []),
+                $request->input('game_type', 'roll-up') // Backward compatible default
             );
 
             // Auto-start the game
@@ -153,11 +158,26 @@ class GameController extends BaseController
                 'message' => 'Invalid action',
             ], 400);
         } catch (\Exception $e) {
+            // Check if this is a validation/client error
+            $clientErrors = [
+                'Player has already rolled in this round',
+                'Player not found',
+                'Invalid player',
+            ];
+
+            $isClientError = false;
+            foreach ($clientErrors as $errorMsg) {
+                if (str_contains($e->getMessage(), $errorMsg)) {
+                    $isClientError = true;
+                    break;
+                }
+            }
+
             return response()->json([
                 'success' => false,
                 'message' => 'Action failed',
                 'error' => $e->getMessage(),
-            ], 500);
+            ], $isClientError ? 400 : 500);
         }
     }
 
@@ -367,6 +387,77 @@ class GameController extends BaseController
                 'success' => false,
                 'message' => $e->getMessage(),
             ], 400);
+        }
+    }
+
+    /**
+     * List all active game types
+     *
+     * GET /api/game-types
+     *
+     * @return JsonResponse
+     */
+    public function listGameTypes(): JsonResponse
+    {
+        try {
+            $gameTypes = $this->gameTypeRegistry->getAllActive();
+
+            return response()->json([
+                'success' => true,
+                'data' => $gameTypes->map(function ($gameType) {
+                    return [
+                        'id' => $gameType->id,
+                        'slug' => $gameType->slug,
+                        'name' => $gameType->name,
+                        'description' => $gameType->description,
+                        'config' => [
+                            'dice' => $gameType->getDiceConfig(),
+                            'player_limits' => $gameType->getPlayerLimits(),
+                            'actions' => $gameType->getAllowedActions(),
+                        ],
+                    ];
+                }),
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to fetch game types',
+                'error' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * Get a specific game type
+     *
+     * GET /api/game-types/{slug}
+     *
+     * @param string $slug
+     * @return JsonResponse
+     */
+    public function getGameType(string $slug): JsonResponse
+    {
+        try {
+            $gameType = GameType::where('slug', $slug)
+                ->where('is_active', true)
+                ->firstOrFail();
+
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    'id' => $gameType->id,
+                    'slug' => $gameType->slug,
+                    'name' => $gameType->name,
+                    'description' => $gameType->description,
+                    'is_active' => $gameType->is_active,
+                    'config' => $gameType->config,
+                ],
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Game type not found',
+            ], 404);
         }
     }
 }

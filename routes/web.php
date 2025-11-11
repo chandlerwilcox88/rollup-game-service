@@ -27,6 +27,10 @@ $router->group(['prefix' => 'api', 'middleware' => 'api.key'], function () use (
     // Health check
     $router->get('/health', 'GameController@health');
 
+    // Game type discovery
+    $router->get('/game-types', 'GameController@listGameTypes');
+    $router->get('/game-types/{slug}', 'GameController@getGameType');
+
     // Game management
     $router->post('/games', 'GameController@store');
     $router->get('/games/{gameId}', 'GameController@show');

@@ -13,6 +13,7 @@ class PlayerRoll extends Model
         'nonce',
         'dice1_value',
         'dice2_value',
+        'dice_values',
         'roll_total',
         'bonus_points',
         'total_points',
@@ -25,6 +26,7 @@ class PlayerRoll extends Model
         'nonce' => 'integer',
         'dice1_value' => 'integer',
         'dice2_value' => 'integer',
+        'dice_values' => 'array',
         'roll_total' => 'integer',
         'bonus_points' => 'integer',
         'total_points' => 'integer',
@@ -49,9 +51,16 @@ class PlayerRoll extends Model
 
     /**
      * Get dice values as array
+     * Backward compatible: uses dice_values if available, otherwise falls back to dice1/dice2
      */
     public function getDiceAttribute(): array
     {
+        // Use new dice_values format if available
+        if ($this->dice_values !== null && !empty($this->dice_values)) {
+            return $this->dice_values;
+        }
+
+        // Fallback to old format for backward compatibility
         return [$this->dice1_value, $this->dice2_value];
     }
 

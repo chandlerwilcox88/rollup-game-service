@@ -23,7 +23,8 @@ class GameService
 {
     public function __construct(
         private ProvablyFairService $provablyFairService,
-        private ScoringService $scoringService
+        private ScoringService $scoringService,
+        private GameTypeRegistry $gameTypeRegistry
     ) {}
 
     /**
@@ -32,11 +33,19 @@ class GameService
      * @param string $roomCode
      * @param array $players
      * @param array $settings
+     * @param string $gameTypeSlug Game type slug (defaults to 'roll-up' for backward compatibility)
      * @return Game
      */
-    public function createGame(string $roomCode, array $players, array $settings = []): Game
+    public function createGame(string $roomCode, array $players, array $settings = [], string $gameTypeSlug = 'roll-up'): Game
     {
-        return DB::transaction(function () use ($roomCode, $players, $settings) {
+        return DB::transaction(function () use ($roomCode, $players, $settings, $gameTypeSlug) {
+            // Get game type
+            $gameTypeImpl = $this->gameTypeRegistry->getBySlug($gameTypeSlug);
+            $gameType = \App\Models\GameType::where('slug', $gameTypeSlug)->firstOrFail();
+
+            // Validate settings against game type rules
+            $validatedSettings = $gameTypeImpl->validateSettings($settings);
+
             // Generate provably fair server seed
             $serverSeed = $this->provablyFairService->generateServerSeed();
             $serverSeedHash = $this->provablyFairService->hashServerSeed($serverSeed);
@@ -45,12 +54,13 @@ class GameService
             $game = Game::create([
                 'id' => (string) Str::uuid(),
                 'room_code' => $roomCode,
+                'game_type_id' => $gameType->id,
                 'server_seed' => $serverSeed,
                 'server_seed_hash' => $serverSeedHash,
                 'status' => 'waiting',
-                'total_rounds' => $settings['rounds'] ?? 10,
-                'turn_time_limit' => $settings['turn_time_limit'] ?? 15,
-                'settings' => $settings,
+                'total_rounds' => $validatedSettings['rounds'],
+                'turn_time_limit' => $validatedSettings['turn_time_limit'],
+                'settings' => $validatedSettings,
             ]);
 
             // Create game players
@@ -66,7 +76,7 @@ class GameService
                 ]);
             }
 
-            return $game->fresh(['players']);
+            return $game->fresh(['players', 'gameType']);
         });
     }
 
@@ -125,41 +135,50 @@ class GameService
                 throw new \Exception('Player has already rolled in this round');
             }
 
+            // Get game type implementation
+            $gameTypeImpl = $this->gameTypeRegistry->getById($game->game_type_id);
+
             $currentRound = $game->current_round;
 
-            // Calculate nonce for this roll
-            // Each player gets 2 dice per round, so: (round - 1) * 2 for dice 1, +1 for dice 2
-            // We use player position to offset nonces between players
-            $baseNonce = (($currentRound - 1) * 2) + (($player->position - 1) * $game->total_rounds * 2);
-
-            // Roll 2 dice using provably fair algorithm
-            $dice1 = $this->provablyFairService->rollDice(
-                $game->server_seed,
-                $player->client_seed,
-                $baseNonce
+            // Roll dice using game type implementation
+            $rollResult = $gameTypeImpl->rollDice(
+                $this->provablyFairService,
+                $game,
+                $player,
+                $currentRound
             );
 
-            $dice2 = $this->provablyFairService->rollDice(
-                $game->server_seed,
-                $player->client_seed,
-                $baseNonce + 1
-            );
+            $diceValues = $rollResult['dice'];
+            $nonces = $rollResult['nonces'];
+            $baseNonce = $nonces[0]; // First nonce for verification
 
-            // Calculate score with bonuses
-            $scoreData = $this->scoringService->calculateScore($dice1, $dice2);
+            // Calculate score using game type implementation
+            $scoreData = $gameTypeImpl->calculateScore($diceValues, [
+                'game' => $game,
+                'player' => $player,
+                'round' => $currentRound,
+            ]);
 
-            // Save roll
-            $roll = PlayerRoll::create([
+            // Prepare roll data for database
+            $rollData = [
                 'game_id' => $game->id,
                 'game_player_id' => $player->id,
                 'round_number' => $currentRound,
                 'nonce' => $baseNonce,
-                'dice1_value' => $dice1,
-                'dice2_value' => $dice2,
+                'dice_values' => $diceValues,
                 'roll_total' => $scoreData['roll_total'],
                 'bonus_points' => $scoreData['bonus_points'],
                 'total_points' => $scoreData['total_points'],
-            ]);
+            ];
+
+            // For backward compatibility with 2-dice games, also store in dice1/dice2
+            if (count($diceValues) === 2) {
+                $rollData['dice1_value'] = $diceValues[0];
+                $rollData['dice2_value'] = $diceValues[1];
+            }
+
+            // Save roll
+            $roll = PlayerRoll::create($rollData);
 
             // Update player total score
             $player->increment('total_score', $scoreData['total_points']);
@@ -167,14 +186,19 @@ class GameService
             // Check if all players have rolled
             $this->checkRoundCompletion($game);
 
+            // Format bonuses for backward compatibility
+            $bonuses = array_map(fn($b) => $b['name'], $scoreData['bonuses_applied'] ?? []);
+            $bonusDescriptions = array_map(fn($b) => "{$b['description']} (+{$b['points']} bonus)", $scoreData['bonuses_applied'] ?? []);
+
             return [
                 'roll_id' => $roll->id,
-                'dice' => [$dice1, $dice2],
+                'dice' => $diceValues,
                 'roll_total' => $scoreData['roll_total'],
                 'bonus_points' => $scoreData['bonus_points'],
                 'total_points' => $scoreData['total_points'],
-                'bonuses' => $scoreData['bonuses'],
-                'bonus_descriptions' => $this->scoringService->getBonusDescriptions($scoreData['bonuses']),
+                'bonuses' => $bonuses,
+                'bonuses_applied' => $scoreData['bonuses_applied'],
+                'bonus_descriptions' => $bonusDescriptions,
                 'player_total_score' => $player->fresh()->total_score,
                 'nonce' => $baseNonce,
             ];
@@ -283,7 +307,7 @@ class GameService
                 $roll = $player->getRollForRound($game->current_round);
                 if ($roll) {
                     $playerData['current_round_roll'] = [
-                        'dice' => [$roll->dice1_value, $roll->dice2_value],
+                        'dice' => $roll->dice, // Uses getDiceAttribute() which is backward compatible
                         'total_points' => $roll->total_points,
                         'bonus_points' => $roll->bonus_points,
                     ];
@@ -335,7 +359,7 @@ class GameService
                     'rolls' => $player->rolls->map(function ($roll) {
                         return [
                             'round' => $roll->round_number,
-                            'dice' => [$roll->dice1_value, $roll->dice2_value],
+                            'dice' => $roll->dice, // Uses getDiceAttribute() which is backward compatible
                             'total_points' => $roll->total_points,
                             'bonus_points' => $roll->bonus_points,
                         ];
@@ -375,29 +399,31 @@ class GameService
         $player = $game->players()->where('user_id', $userId)->firstOrFail();
         $roll = $player->rolls()->where('round_number', $roundNumber)->firstOrFail();
 
-        // Verify dice 1
-        $verifyDice1 = $this->provablyFairService->verify(
-            $game->server_seed,
-            $player->client_seed,
-            $roll->nonce,
-            $roll->dice1_value
-        );
+        // Get dice values (backward compatible)
+        $diceValues = $roll->dice;
+        $verifications = [];
+        $allVerified = true;
 
-        // Verify dice 2
-        $verifyDice2 = $this->provablyFairService->verify(
-            $game->server_seed,
-            $player->client_seed,
-            $roll->nonce + 1,
-            $roll->dice2_value
-        );
+        // Verify each die
+        foreach ($diceValues as $index => $dieValue) {
+            $nonce = $roll->nonce + $index;
+            $verification = $this->provablyFairService->verify(
+                $game->server_seed,
+                $player->client_seed,
+                $nonce,
+                $dieValue
+            );
+
+            $verifications["dice" . ($index + 1)] = $verification;
+            $allVerified = $allVerified && $verification['verified'];
+        }
 
         return [
-            'verified' => $verifyDice1['verified'] && $verifyDice2['verified'],
-            'dice1' => $verifyDice1,
-            'dice2' => $verifyDice2,
+            'verified' => $allVerified,
+            ...$verifications, // Spread dice1, dice2, etc.
             'roll' => [
                 'round' => $roll->round_number,
-                'dice' => [$roll->dice1_value, $roll->dice2_value],
+                'dice' => $diceValues,
                 'total_points' => $roll->total_points,
             ],
         ];

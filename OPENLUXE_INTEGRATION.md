@@ -37,11 +37,12 @@ J6GyGI5U8f165xk7gKCBL94pzA3DXSd6MUt+Rf1j5So=
 ```php
 use Illuminate\Support\Facades\Http;
 
-// Create a game
+// Create a game (defaults to Roll Up)
 $response = Http::withHeaders([
     'X-API-Key' => config('services.rollup.api_key'),
 ])->post(config('services.rollup.url') . '/api/games', [
     'room_code' => $room->code,
+    'game_type' => 'roll-up', // Optional, defaults to 'roll-up'
     'players' => [
         ['id' => 1, 'username' => 'Player 1', 'position' => 1],
         ['id' => 2, 'username' => 'Player 2', 'position' => 2],
@@ -63,12 +64,62 @@ curl -X POST \
   -H "Content-Type: application/json" \
   -d '{
     "room_code": "ABC123",
+    "game_type": "roll-up",
     "players": [
       {"id": 1, "username": "player1", "position": 1},
       {"id": 2, "username": "player2", "position": 2}
     ]
   }' \
   http://rollup-game-service.test/api/games
+```
+
+---
+
+## Game Types
+
+The microservice now supports multiple game types. You can discover available games and their configurations.
+
+### List Available Game Types
+
+```php
+$response = $this->client()->get('/api/game-types');
+$gameTypes = $response->json()['data'];
+
+// Returns:
+// [
+//   {
+//     "id": 1,
+//     "slug": "roll-up",
+//     "name": "Roll Up",
+//     "description": "Classic 2-dice game...",
+//     "config": {
+//       "dice": {"count": 2, "min": 1, "max": 6},
+//       "player_limits": {"min": 2, "max": 6},
+//       "actions": ["roll"]
+//     }
+//   }
+// ]
+```
+
+### Get Specific Game Type
+
+```php
+$response = $this->client()->get('/api/game-types/roll-up');
+$gameType = $response->json()['data'];
+```
+
+### Create Game with Specific Type
+
+```php
+// Create a Roll Up game (default)
+$game = $this->createGame($roomCode, $players, [
+    'rounds' => 10,
+]);
+
+// When other games are added (e.g., Yahtzee), specify the type:
+$game = $this->createGame($roomCode, $players, [
+    'rounds' => 10,
+], 'yahtzee'); // Future: specify game type
 ```
 
 ---
@@ -119,18 +170,45 @@ class RollUpService
     }
 
     /**
+     * Get available game types
+     */
+    public function getGameTypes()
+    {
+        $response = $this->client()->get('/api/game-types');
+
+        return $response->json();
+    }
+
+    /**
+     * Get a specific game type
+     */
+    public function getGameType(string $slug)
+    {
+        $response = $this->client()->get("/api/game-types/{$slug}");
+
+        return $response->json();
+    }
+
+    /**
      * Create a new game
      */
-    public function createGame(string $roomCode, array $players, array $settings = [])
+    public function createGame(string $roomCode, array $players, array $settings = [], ?string $gameType = null)
     {
-        $response = $this->client()->post('/api/games', [
+        $data = [
             'room_code' => $roomCode,
             'players' => $players,
             'settings' => array_merge([
                 'rounds' => 10,
                 'turn_time_limit' => 15,
             ], $settings),
-        ]);
+        ];
+
+        // Add game type if specified (defaults to 'roll-up' on server)
+        if ($gameType) {
+            $data['game_type'] = $gameType;
+        }
+
+        $response = $this->client()->post('/api/games', $data);
 
         return $response->json();
     }
@@ -281,39 +359,63 @@ class GameRoomController extends Controller
 
 ## API Endpoints Reference
 
-### Create Game
+### Game Type Discovery
+
+#### List Game Types
+```
+GET /api/game-types
+```
+Returns all available game types with their configurations.
+
+#### Get Game Type
+```
+GET /api/game-types/{slug}
+```
+Get detailed configuration for a specific game type (e.g., `/api/game-types/roll-up`).
+
+### Game Management
+
+#### Create Game
 ```
 POST /api/games
+Body: {
+  "room_code": "ABC123",
+  "game_type": "roll-up",  // Optional, defaults to 'roll-up'
+  "players": [...],
+  "settings": {...}
+}
 ```
 
-### Get Game State
+#### Get Game State
 ```
 GET /api/games/{gameId}?user_id={userId}
 ```
 
-### Roll Dice
+#### Roll Dice
 ```
 POST /api/games/{gameId}/action
 Body: { "user_id": 1, "action": "roll" }
 ```
 
-### Get Results
+#### Get Results
 ```
 GET /api/games/{gameId}/results
 ```
 
-### Verify Roll (Provably Fair)
+### Provably Fair Verification
+
+#### Verify Roll
 ```
 POST /api/games/{gameId}/verify
 Body: { "user_id": 1, "round_number": 3 }
 ```
 
-### Get Server Seed Hash (Before Game)
+#### Get Server Seed Hash (Before Game)
 ```
 GET /api/games/{gameId}/server-seed-hash
 ```
 
-### Get Server Seed (After Game)
+#### Get Server Seed (After Game)
 ```
 GET /api/games/{gameId}/server-seed
 ```

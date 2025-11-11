@@ -6,6 +6,8 @@
 
 **Roll Up** is an open-source, provably fair multiplayer dice game microservice built with Lumen. It implements a cryptographically secure random number generation system ensuring complete transparency and verifiability through cryptographic commitment.
 
+🎲 **Multi-Game Support**: The service now supports multiple dice game types with an extensible architecture. Currently includes Roll Up, with support for adding Yahtzee, Liar's Dice, Farkle, and more!
+
 ## Why Open Source?
 
 We believe **transparency is the foundation of trust** in gaming. By open-sourcing Roll Up, we allow anyone to:
@@ -124,11 +126,17 @@ curl -H "X-API-Key: YOUR_API_KEY" \
 
 ### Key Endpoints
 
+#### List Game Types
+```http
+GET /api/game-types
+```
+
 #### Create Game
 ```http
 POST /api/games
 {
   "room_code": "ABC123",
+  "game_type": "roll-up",  // Optional, defaults to 'roll-up'
   "players": [
     {"id": 1, "username": "player1", "position": 1},
     {"id": 2, "username": "player2", "position": 2}
@@ -156,6 +164,8 @@ POST /api/games/{gameId}/verify
 
 **Full API Docs**: See [API.md](docs/API.md) or test with the examples in `tests/`
 
+**Adding New Games**: See [GAME_TYPES.md](GAME_TYPES.md) for a guide on adding Yahtzee, Liar's Dice, and other games
+
 ---
 
 ## Project Structure
@@ -166,10 +176,17 @@ app/
 │   └── GameController.php           # API endpoints
 ├── Models/
 │   ├── Game.php                     # Game + provably fair seeds
+│   ├── GameType.php                 # Game type configurations
 │   ├── GamePlayer.php               # Players + scores
 │   └── PlayerRoll.php               # Individual rolls
+├── GameTypes/                        # 🎲 Game type implementations
+│   ├── AbstractGameType.php         # Base class for all games
+│   └── RollUpGameType.php           # Roll Up implementation
+├── Contracts/
+│   └── GameTypeInterface.php        # Game type contract
 ├── Services/
 │   ├── ProvablyFairService.php      # ⭐ Cryptographic RNG
+│   ├── GameTypeRegistry.php         # Game type management
 │   ├── ScoringService.php           # Bonus calculations
 │   └── GameService.php              # Game orchestration
 

@@ -15,6 +15,7 @@ class Game extends Model
     protected $fillable = [
         'id',
         'room_code',
+        'game_type_id',
         'status',
         'server_seed',
         'server_seed_hash',
@@ -22,22 +23,33 @@ class Game extends Model
         'current_round',
         'turn_time_limit',
         'settings',
+        'game_config',
         'started_at',
         'completed_at',
     ];
 
     protected $casts = [
         'settings' => 'array',
+        'game_config' => 'array',
         'started_at' => 'datetime',
         'completed_at' => 'datetime',
         'total_rounds' => 'integer',
         'current_round' => 'integer',
         'turn_time_limit' => 'integer',
+        'game_type_id' => 'integer',
     ];
 
     protected $hidden = [
         'server_seed', // Hide until game is completed
     ];
+
+    /**
+     * Get the game type for this game
+     */
+    public function gameType()
+    {
+        return $this->belongsTo(GameType::class, 'game_type_id');
+    }
 
     /**
      * Get the players for this game
