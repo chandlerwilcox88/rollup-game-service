@@ -4,6 +4,8 @@ namespace App\Http\Controllers;
 
 use App\Models\Game;
 use App\Models\GameType;
+use App\Models\RoomGameHistory;
+use App\Models\RoomPlayerStats;
 use App\Services\GameService;
 use App\Services\GameTypeRegistry;
 use App\Services\ProvablyFairService;
@@ -458,6 +460,62 @@ class GameController extends BaseController
                 'success' => false,
                 'message' => 'Game type not found',
             ], 404);
+        }
+    }
+
+    /**
+     * Get room game history
+     *
+     * GET /api/rooms/{roomCode}/history
+     *
+     * Returns all completed games for a room
+     *
+     * @param string $roomCode
+     * @return JsonResponse
+     */
+    public function getRoomHistory(string $roomCode): JsonResponse
+    {
+        try {
+            $history = RoomGameHistory::getRoomHistory($roomCode);
+
+            return response()->json([
+                'success' => true,
+                'data' => $history,
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to fetch room history',
+                'error' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * Get room player stats
+     *
+     * GET /api/rooms/{roomCode}/stats
+     *
+     * Returns player statistics (wins, scores) for all players in a room
+     *
+     * @param string $roomCode
+     * @return JsonResponse
+     */
+    public function getRoomStats(string $roomCode): JsonResponse
+    {
+        try {
+            $stats = RoomPlayerStats::getRoomStats($roomCode);
+
+            return response()->json([
+                'success' => true,
+                'data' => $stats,
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to fetch room stats',
+                'error' => $e->getMessage(),
+            ], 500);
         }
     }
 }

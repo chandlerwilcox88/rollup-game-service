@@ -6,6 +6,8 @@ use App\Models\Game;
 use App\Models\GamePlayer;
 use App\Models\GameRound;
 use App\Models\PlayerRoll;
+use App\Models\RoomGameHistory;
+use App\Models\RoomPlayerStats;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\DB;
 
@@ -255,11 +257,13 @@ class GameService
 
         // Determine placements
         $players = $game->players()
-            ->select('id', 'total_score')
+            ->select('id', 'user_id', 'username', 'total_score')
             ->get()
             ->map(function ($player) {
                 return [
                     'id' => $player->id,
+                    'user_id' => $player->user_id,
+                    'username' => $player->username,
                     'total_score' => $player->total_score,
                 ];
             })
@@ -271,6 +275,52 @@ class GameService
         foreach ($playersWithPlacements as $playerData) {
             GamePlayer::where('id', $playerData['id'])
                 ->update(['placement' => $playerData['placement']]);
+        }
+
+        // Save to room history and update player stats
+        $this->saveGameToRoomHistory($game, $playersWithPlacements);
+    }
+
+    /**
+     * Save completed game to room history and update player stats
+     *
+     * @param Game $game
+     * @param array $playersWithPlacements
+     * @return void
+     */
+    private function saveGameToRoomHistory(Game $game, array $playersWithPlacements): void
+    {
+        // Find the winner (placement 1)
+        $winner = collect($playersWithPlacements)->firstWhere('placement', 1);
+
+        if (!$winner || !$game->room_code) {
+            return; // Can't save history without a winner or room code
+        }
+
+        // Get next game number for this room
+        $gameNumber = RoomGameHistory::getNextGameNumber($game->room_code);
+
+        // Save game to history
+        RoomGameHistory::create([
+            'room_code' => $game->room_code,
+            'game_id' => $game->id,
+            'game_number' => $gameNumber,
+            'winner_user_id' => $winner['user_id'],
+            'winner_username' => $winner['username'],
+            'total_rounds' => $game->total_rounds,
+            'started_at' => $game->started_at,
+            'completed_at' => $game->completed_at,
+        ]);
+
+        // Update stats for all players
+        foreach ($playersWithPlacements as $player) {
+            RoomPlayerStats::updatePlayerStats(
+                $game->room_code,
+                $player['user_id'],
+                $player['username'],
+                $player['total_score'],
+                $player['placement']
+            );
         }
     }
 

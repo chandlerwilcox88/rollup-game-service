@@ -43,4 +43,8 @@ $router->group(['prefix' => 'api', 'middleware' => 'api.key'], function () use (
     $router->get('/games/{gameId}/server-seed', 'GameController@serverSeed');
     $router->post('/games/{gameId}/verify', 'GameController@verify');
     $router->post('/games/{gameId}/update-seed', 'GameController@updateSeed');
+
+    // Room-level endpoints (match history, player stats)
+    $router->get('/rooms/{roomCode}/history', 'GameController@getRoomHistory');
+    $router->get('/rooms/{roomCode}/stats', 'GameController@getRoomStats');
 });
