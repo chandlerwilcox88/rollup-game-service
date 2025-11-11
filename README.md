@@ -259,10 +259,50 @@ psql -U postgres -c "CREATE DATABASE rollup;"
 php artisan migrate --force
 ```
 
-### Laravel Cloud (Recommended)
+### Laravel Cloud (Production)
+
+**Deployment URL:** `https://rollup.laravel.cloud`
+
+#### Required Environment Variables
+
+Set these in Laravel Cloud dashboard:
+
+```env
+# Application
+APP_NAME="Roll Up Game Service"
+APP_ENV=production
+APP_DEBUG=false
+APP_URL=https://rollup.laravel.cloud
+
+# Database (auto-configured by Laravel Cloud)
+DB_CONNECTION=pgsql
+DB_HOST=<laravel-cloud-provides>
+DB_DATABASE=<laravel-cloud-provides>
+DB_USERNAME=<laravel-cloud-provides>
+DB_PASSWORD=<laravel-cloud-provides>
+
+# Redis Cache (use Laravel Cloud Redis instance: main-rollup)
+CACHE_DRIVER=redis
+REDIS_CLIENT=predis
+REDIS_HOST=main-rollup
+REDIS_PASSWORD=<laravel-cloud-provides>
+REDIS_PORT=6379
+REDIS_DB=0
+REDIS_CACHE_DB=1
+
+# Queue
+QUEUE_CONNECTION=sync
+
+# API Authentication (same key used by OpenLuxe)
+API_KEY_OPENLUXE=<your-secure-api-key>
+
+# CORS - Allow OpenLuxe production domains
+CORS_ALLOWED_ORIGINS=https://openluxe.co,https://www.openluxe.co
+```
+
+**Deploy Command:**
 ```bash
-composer global require laravel/cloud-cli
-laravel-cloud deploy
+git push origin main  # Auto-deploys on Laravel Cloud
 ```
 
 ### Manual Deployment
