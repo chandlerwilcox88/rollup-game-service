@@ -10,6 +10,8 @@ class PlayerRoll extends Model
         'game_id',
         'game_player_id',
         'round_number',
+        'turn_number',
+        'roll_sequence',
         'nonce',
         'dice1_value',
         'dice2_value',
@@ -17,12 +19,20 @@ class PlayerRoll extends Model
         'roll_total',
         'bonus_points',
         'total_points',
+        'held_dice',
+        'available_dice',
+        'pending_score',
+        'is_bust',
+        'action_type',
+        'target_player_id',
         'rolled_at',
     ];
 
     protected $casts = [
         'game_player_id' => 'integer',
         'round_number' => 'integer',
+        'turn_number' => 'integer',
+        'roll_sequence' => 'integer',
         'nonce' => 'integer',
         'dice1_value' => 'integer',
         'dice2_value' => 'integer',
@@ -30,6 +40,11 @@ class PlayerRoll extends Model
         'roll_total' => 'integer',
         'bonus_points' => 'integer',
         'total_points' => 'integer',
+        'held_dice' => 'array',
+        'available_dice' => 'array',
+        'pending_score' => 'integer',
+        'is_bust' => 'boolean',
+        'target_player_id' => 'integer',
         'rolled_at' => 'datetime',
     ];
 

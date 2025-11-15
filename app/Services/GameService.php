@@ -10,6 +10,7 @@ use App\Models\RoomGameHistory;
 use App\Models\RoomPlayerStats;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Game Service
@@ -100,7 +101,7 @@ class GameService
         // Create first round
         $this->createRound($game, 1);
 
-        return $game->fresh();
+        return $game->fresh(['players', 'gameType']);
     }
 
     /**
@@ -129,14 +130,21 @@ class GameService
      */
     public function rollDice(Game $game, int $userId): array
     {
-        return DB::transaction(function () use ($game, $userId) {
-            // Get the player
-            $player = $game->players()->where('user_id', $userId)->firstOrFail();
+        try {
+            return DB::transaction(function () use ($game, $userId) {
+                // Get the player
+                $player = $game->players()->where('user_id', $userId)->firstOrFail();
 
-            // Check if already rolled this round
-            if ($player->hasRolledInRound($game->current_round)) {
-                throw new \Exception('Player has already rolled in this round');
-            }
+                // Check if turn is already completed this round (banked or busted)
+                if ($player->hasCompletedTurnInRound($game->current_round)) {
+                    throw new \Exception('Player has already completed their turn in this round');
+                }
+
+                // Initialize turn state if this is the first roll of the round
+                if (empty($player->turn_state)) {
+                    $this->turnStateManager->initializeTurn($player);
+                    $player->refresh(); // Reload to get the updated turn_state
+                }
 
             // Get game type implementation
             $gameTypeImpl = $this->gameTypeRegistry->getById($game->game_type_id);
@@ -162,11 +170,43 @@ class GameService
                 'round' => $currentRound,
             ]);
 
+            // Get the current roll sequence for this turn (how many times rolled in this round)
+            $rollSequence = $player->rolls()
+                ->where('round_number', $currentRound)
+                ->count() + 1;
+
+            // Idempotent check: Check if this roll already exists (browser refresh scenario)
+            // IMPORTANT: Check BEFORE trying to create to avoid failed transaction state
+            $existingRoll = PlayerRoll::where('game_id', $game->id)
+                ->where('game_player_id', $player->id)
+                ->where('round_number', $currentRound)
+                ->where('roll_sequence', $rollSequence)
+                ->first();
+
+            if ($existingRoll) {
+                // Duplicate roll detected - player likely refreshed browser
+                // Return the existing roll without modifying database
+                return [
+                    'roll_id' => $existingRoll->id,
+                    'dice' => $existingRoll->dice_values ?? [$existingRoll->dice1_value, $existingRoll->dice2_value],
+                    'roll_total' => $existingRoll->roll_total,
+                    'bonus_points' => $existingRoll->bonus_points,
+                    'total_points' => $existingRoll->total_points,
+                    'bonuses' => [], // Existing roll, no need to recalculate
+                    'bonuses_applied' => [],
+                    'bonus_descriptions' => [],
+                    'player_total_score' => $player->fresh()->total_score,
+                    'nonce' => $existingRoll->nonce,
+                    'is_duplicate' => true, // Flag for frontend to know this was a refresh
+                ];
+            }
+
             // Prepare roll data for database
             $rollData = [
                 'game_id' => $game->id,
                 'game_player_id' => $player->id,
                 'round_number' => $currentRound,
+                'roll_sequence' => $rollSequence,
                 'nonce' => $baseNonce,
                 'dice_values' => $diceValues,
                 'roll_total' => $scoreData['roll_total'],
@@ -180,32 +220,60 @@ class GameService
                 $rollData['dice2_value'] = $diceValues[1];
             }
 
-            // Save roll
+            // Create the roll (no duplicate possible due to check above)
             $roll = PlayerRoll::create($rollData);
 
             // Update player total score
             $player->increment('total_score', $scoreData['total_points']);
 
-            // Check if all players have rolled
-            $this->checkRoundCompletion($game);
+            // Update turn state after roll (enables hold/bank actions)
+            $regularDice = array_slice($diceValues, 0, 6);  // Get just the 6 regular dice
+            $turnState = $this->turnStateManager->afterRoll($player, $regularDice, $scoreData);
+
+            // Don't check round completion after rolls - only after bank/bust
 
             // Format bonuses for backward compatibility
             $bonuses = array_map(fn($b) => $b['name'], $scoreData['bonuses_applied'] ?? []);
             $bonusDescriptions = array_map(fn($b) => "{$b['description']} (+{$b['points']} bonus)", $scoreData['bonuses_applied'] ?? []);
 
+            // Convert best_combination to frontend-compatible combination format
+            $combination = $this->formatCombinationForFrontend(
+                $scoreData['best_combination'] ?? null,
+                $regularDice
+            );
+
             return [
                 'roll_id' => $roll->id,
                 'dice' => $diceValues,
+                'regular_dice' => $regularDice,
+                'special_die' => $diceValues[6] ?? null,
+                'special_die_positive' => $scoreData['special_die_positive'] ?? true,
                 'roll_total' => $scoreData['roll_total'],
                 'bonus_points' => $scoreData['bonus_points'],
                 'total_points' => $scoreData['total_points'],
                 'bonuses' => $bonuses,
-                'bonuses_applied' => $scoreData['bonuses_applied'],
+                'bonuses_applied' => $scoreData['bonuses_applied'] ?? [],
                 'bonus_descriptions' => $bonusDescriptions,
                 'player_total_score' => $player->fresh()->total_score,
                 'nonce' => $baseNonce,
+                'best_combination' => $scoreData['best_combination'] ?? null,
+                'combination' => $combination,  // Frontend-compatible format
+                'turn_state' => $turnState,  // Include turn state in response
             ];
-        });
+            });
+        } catch (\Exception $e) {
+            // Log the error with context
+            Log::error('Roll dice failed', [
+                'game_id' => $game->id,
+                'user_id' => $userId,
+                'current_round' => $game->current_round,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+
+            // Rethrow the exception to be handled by the controller
+            throw $e;
+        }
     }
 
     /**
@@ -220,13 +288,11 @@ class GameService
     public function holdDice(Game $game, int $userId, array $heldDiceIndices): array
     {
         return DB::transaction(function () use ($game, $userId, $heldDiceIndices) {
-            // Verify it's this player's turn
-            if (!$game->currentPlayer || $game->currentPlayer->user_id !== $userId) {
-                throw new \Exception('Not your turn');
-            }
+            // Get the player (no turn check for simultaneous play)
+            $player = $game->players()->where('user_id', $userId)->firstOrFail();
 
             // Get turn state
-            $turnState = $this->turnStateManager->getTurnState($game);
+            $turnState = $this->turnStateManager->getTurnState($player);
             if (!($turnState['can_hold'] ?? false)) {
                 throw new \Exception('Cannot hold dice at this time');
             }
@@ -260,7 +326,7 @@ class GameService
 
             $scoreData = $gameTypeImpl->calculateScore(array_slice($paddedDice, 0, 7), [
                 'game' => $game,
-                'player' => $game->currentPlayer,
+                'player' => $player,
                 'evaluating_held_dice' => true,
             ]);
 
@@ -268,8 +334,9 @@ class GameService
 
             // Update turn state
             $updatedTurnState = $this->turnStateManager->afterHold(
-                $game,
+                $player,
                 $heldDiceValues,
+                $heldDiceIndices,
                 $scoreFromHeldDice
             );
 
@@ -294,20 +361,17 @@ class GameService
     public function bankPoints(Game $game, int $userId, ?int $targetPlayerId = null): array
     {
         return DB::transaction(function () use ($game, $userId, $targetPlayerId) {
-            // Verify it's this player's turn
-            if (!$game->currentPlayer || $game->currentPlayer->user_id !== $userId) {
-                throw new \Exception('Not your turn');
-            }
+            // Get the player (no turn check for simultaneous play)
+            $player = $game->players()->where('user_id', $userId)->firstOrFail();
 
             // Get turn state
-            $turnState = $this->turnStateManager->getTurnState($game);
+            $turnState = $this->turnStateManager->getTurnState($player);
             if (!($turnState['can_bank'] ?? false)) {
                 throw new \Exception('Cannot bank at this time');
             }
 
             $pendingScore = $turnState['pending_score'] ?? 0;
             $specialDiePositive = $turnState['special_die_positive'] ?? true;
-            $player = $game->currentPlayer;
 
             // Determine where points go
             if ($specialDiePositive) {
@@ -356,12 +420,9 @@ class GameService
             PlayerRoll::create($rollData);
 
             // Mark turn as banked
-            $this->turnStateManager->bankScore($game);
+            $this->turnStateManager->bankScore($player);
 
-            // Advance to next player
-            $nextPlayer = $this->turnStateManager->advanceToNextPlayer($game);
-
-            // Check if round is complete
+            // Check if round is complete (no need to advance - simultaneous play)
             $this->checkRoundCompletion($game);
 
             return [
@@ -373,16 +434,12 @@ class GameService
                     'new_total_score' => $targetPlayer->total_score,
                 ] : null,
                 'player_total_score' => $player->fresh()->total_score,
-                'next_player' => [
-                    'user_id' => $nextPlayer->user_id,
-                    'username' => $nextPlayer->username,
-                ],
             ];
         });
     }
 
     /**
-     * Check if all players have rolled in current round and advance if needed
+     * Check if all players have completed their turns in current round and advance if needed
      *
      * @param Game $game
      * @return void
@@ -391,12 +448,13 @@ class GameService
     {
         $currentRound = $game->current_round;
         $totalPlayers = $game->players()->count();
-        $playersWhoRolled = PlayerRoll::where('game_id', $game->id)
+        $playersWhoCompletedTurn = PlayerRoll::where('game_id', $game->id)
             ->where('round_number', $currentRound)
+            ->whereIn('action_type', ['bank', 'bust'])
             ->distinct('game_player_id')
             ->count();
 
-        if ($playersWhoRolled >= $totalPlayers) {
+        if ($playersWhoCompletedTurn >= $totalPlayers) {
             // Mark round as completed
             GameRound::where('game_id', $game->id)
                 ->where('round_number', $currentRound)
@@ -511,6 +569,7 @@ class GameService
 
         $players = $game->players->map(function ($player) use ($game, $requestingUserId) {
             $hasRolledThisRound = $player->hasRolledInRound($game->current_round);
+            $hasCompletedTurnThisRound = $player->hasCompletedTurnInRound($game->current_round);
 
             $playerData = [
                 'id' => $player->id,
@@ -521,6 +580,8 @@ class GameService
                 'placement' => $player->placement,
                 'status' => $player->status,
                 'has_rolled_this_round' => $hasRolledThisRound,
+                'has_completed_turn_this_round' => $hasCompletedTurnThisRound,
+                'turn_state' => $player->turn_state,  // Each player has their own turn state
             ];
 
             // Only show roll details if:
@@ -528,7 +589,7 @@ class GameService
             // 2. All players have rolled this round, OR
             // 3. Game is completed
             if ($game->isCompleted() || $player->user_id === $requestingUserId) {
-                $roll = $player->getRollForRound($game->current_round);
+                $roll = $player->getLatestRollForRound($game->current_round);
                 if ($roll) {
                     $playerData['current_round_roll'] = [
                         'dice' => $roll->dice, // Uses getDiceAttribute() which is backward compatible
@@ -552,6 +613,8 @@ class GameService
             'started_at' => $game->started_at?->toIso8601String(),
             'completed_at' => $game->completed_at?->toIso8601String(),
             'players' => $players,
+            // No current_player_id - simultaneous gameplay
+            // turn_state is now per-player (in each player's data)
         ];
     }
 
@@ -650,6 +713,57 @@ class GameService
                 'dice' => $diceValues,
                 'total_points' => $roll->total_points,
             ],
+        ];
+    }
+
+    /**
+     * Convert best_combination to frontend-compatible combination format
+     *
+     * @param array|null $bestCombination The best_combination from scoring
+     * @param array $regularDice The rolled dice values (6 dice, excluding special die)
+     * @return array|null Formatted combination object or null
+     */
+    private function formatCombinationForFrontend(?array $bestCombination, array $regularDice): ?array
+    {
+        // Return null if no combination or if it's a sum/none combination
+        if (!$bestCombination ||
+            $bestCombination['name'] === 'sum' ||
+            $bestCombination['name'] === 'none') {
+            return null;
+        }
+
+        // Map combination names to material tiers
+        $tierMap = [
+            'six_of_a_kind' => 'diamond',
+            'five_of_a_kind' => 'ruby',
+            'large_straight' => 'emerald',
+            'four_of_a_kind' => 'gold',
+            'full_house' => 'rainbow',
+            'small_straight' => 'crystal',
+            'three_of_a_kind' => 'silver',
+            'two_pairs' => 'bronze',
+            'one_pair' => 'bronze',
+        ];
+
+        $tier = $tierMap[$bestCombination['name']] ?? 'wood';
+
+        // Use the dice_indices from the combination (already calculated in detectCombinations)
+        $diceIndices = $bestCombination['dice_indices'] ?? [];
+        $diceUsed = $bestCombination['dice_used'] ?? [];
+
+        // Extract the dice value (if applicable)
+        $value = null;
+        if (count($diceUsed) > 0) {
+            // For combinations like "three of a kind", the value is the repeated number
+            $value = $diceUsed[0];
+        }
+
+        return [
+            'type' => $bestCombination['name'],
+            'tier' => $tier,
+            'dice_indices' => $diceIndices,
+            'value' => $value,
+            'display_name' => $bestCombination['description'],
         ];
     }
 }

@@ -16,6 +16,7 @@ class GamePlayer extends Model
         'placement',
         'status',
         'joined_at',
+        'turn_state',
     ];
 
     protected $casts = [
@@ -24,6 +25,7 @@ class GamePlayer extends Model
         'total_score' => 'integer',
         'placement' => 'integer',
         'joined_at' => 'datetime',
+        'turn_state' => 'array',
     ];
 
     /**
@@ -53,12 +55,35 @@ class GamePlayer extends Model
     }
 
     /**
+     * Check if player has completed their turn in a specific round
+     * (either banked or busted)
+     */
+    public function hasCompletedTurnInRound(int $roundNumber): bool
+    {
+        return $this->rolls()
+            ->where('round_number', $roundNumber)
+            ->whereIn('action_type', ['bank', 'bust'])
+            ->exists();
+    }
+
+    /**
      * Get player's roll for a specific round
      */
     public function getRollForRound(int $roundNumber)
     {
         return $this->rolls()
             ->where('round_number', $roundNumber)
+            ->first();
+    }
+
+    /**
+     * Get player's latest roll for a specific round
+     */
+    public function getLatestRollForRound(int $roundNumber)
+    {
+        return $this->rolls()
+            ->where('round_number', $roundNumber)
+            ->latest('id')
             ->first();
     }
 }
