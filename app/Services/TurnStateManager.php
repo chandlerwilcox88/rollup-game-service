@@ -2,240 +2,198 @@
 
 namespace App\Services;
 
+use App\GameTypes\RollUpGameType;
 use App\Models\GamePlayer;
 
 /**
  * TurnStateManager
  *
- * Manages per-player turn state for Roll Up simultaneous gameplay.
- * Each player maintains their own turn state independently.
+ * Owns the per-player turn state for Roll Up. Every player plays one turn per
+ * round (all players play the round at the same time), so the state is reset
+ * for every player whenever a round starts.
+ *
+ * Phases:
+ *   roll   - may roll (start of the turn)
+ *   hold   - just rolled scoring dice; must hold at least one before anything else
+ *   decide - has held; may bank the pot, or roll the remaining dice
+ *   bust   - rolled no scoring dice; the turn is over and the pot is lost
+ *   banked - banked the pot; the turn is over
+ *
+ * All die indices are POSITIONS: 0-5 regular dice, 6 the special die.
  */
 class TurnStateManager
 {
-    /**
-     * Initialize turn state for a player's round
-     *
-     * @param GamePlayer $player
-     * @return array
-     */
-    public function initializeTurn(GamePlayer $player): array
+    public function initialState(int $round): array
     {
-        $turnState = [
+        return [
+            'round' => $round,
+            'phase' => 'roll',
+            'dice' => array_fill(0, RollUpGameType::TOTAL_DICE, null),
+            'held_indices' => [],
             'held_dice' => [],
-            'held_dice_indices' => [],
-            'available_dice' => [],  // Will be populated after first roll
+            'available_indices' => range(0, RollUpGameType::REGULAR_DICE - 1),
+            'available_dice' => [],
+            'last_rolled_indices' => [],
+            'special_die' => null,
+            'special_die_positive' => null,
             'pending_score' => 0,
-            'can_hold' => false,     // True after rolling
-            'can_bank' => false,     // True after holding scoring dice
-            'can_roll' => true,      // Initially true, false after bust
+            'can_roll' => true,
+            'can_hold' => false,
+            'can_bank' => false,
             'turn_roll_count' => 0,
             'is_bust' => false,
             'is_banked' => false,
+            'hot_dice' => false,
         ];
-
-        $player->update(['turn_state' => $turnState]);
-
-        return $turnState;
     }
 
     /**
-     * Update turn state after a roll
+     * Give every player a fresh turn for the given round.
      *
-     * @param GamePlayer $player
-     * @param array $diceResults 6 regular dice values
-     * @param array $scoringResult Result from RollUpGameType::calculateScore()
-     * @return array Updated turn state
+     * @param  iterable<GamePlayer>  $players
      */
-    public function afterRoll(GamePlayer $player, array $diceResults, array $scoringResult): array
+    public function resetForRound(iterable $players, int $round): void
     {
-        $turnState = $player->turn_state ?? [];
-        $turnState['turn_roll_count'] = ($turnState['turn_roll_count'] ?? 0) + 1;
-        $turnState['available_dice'] = $diceResults;
+        foreach ($players as $player) {
+            $player->update(['turn_state' => $this->initialState($round)]);
+        }
+    }
 
-        // Check if player rolled a scoring combination
-        $hasScoringCombo = $scoringResult['best_combination']['name'] !== 'sum' &&
-                           $scoringResult['best_combination']['name'] !== 'none';
+    /**
+     * The player's state for this round. A missing state, or one left over
+     * from an earlier round, is replaced by a fresh one.
+     */
+    public function stateFor(GamePlayer $player, int $round): array
+    {
+        $state = $player->turn_state;
 
-        if ($hasScoringCombo) {
-            // Player rolled a scoring combo - can hold dice
-            $turnState['can_hold'] = true;
-            $turnState['can_bank'] = false;  // Must hold first
-            $turnState['can_roll'] = false;  // Must hold or bank first
+        if (empty($state) || ($state['round'] ?? null) !== $round) {
+            $state = $this->initialState($round);
+            $player->update(['turn_state' => $state]);
+        }
+
+        return $state;
+    }
+
+    /**
+     * Which positions the next roll throws. Hot dice (all six held) throws all
+     * six again; the special die is thrown only on the first roll of the turn.
+     *
+     * @return int[]
+     */
+    public function positionsToRoll(array $state): array
+    {
+        $held = $state['held_indices'] ?? [];
+        if (count($held) >= RollUpGameType::REGULAR_DICE) {
+            $held = [];
+        }
+
+        $positions = array_values(array_diff(range(0, RollUpGameType::REGULAR_DICE - 1), $held));
+
+        if (($state['turn_roll_count'] ?? 0) === 0) {
+            $positions[] = RollUpGameType::SPECIAL_DIE_INDEX;
+        }
+
+        return $positions;
+    }
+
+    /**
+     * @param  array<int,int|null>  $dice  all 7 positional values after the throw
+     * @param  int[]  $rolledIndices  positions thrown by this roll
+     */
+    public function afterRoll(GamePlayer $player, array $state, array $dice, array $rolledIndices, bool $isBust, bool $specialPositive): array
+    {
+        $regularRolled = array_values(array_filter($rolledIndices, fn ($i) => $i < RollUpGameType::REGULAR_DICE));
+
+        // A hot-dice re-roll throws all six, so nothing is held any more.
+        $held = count($regularRolled) === RollUpGameType::REGULAR_DICE ? [] : ($state['held_indices'] ?? []);
+
+        $state['dice'] = $dice;
+        $state['held_indices'] = $held;
+        $state['held_dice'] = $this->valuesAt($dice, $held);
+        $state['available_indices'] = $regularRolled;
+        $state['available_dice'] = $this->valuesAt($dice, $regularRolled);
+        $state['last_rolled_indices'] = $rolledIndices;
+        $state['special_die'] = $dice[RollUpGameType::SPECIAL_DIE_INDEX];
+        $state['special_die_positive'] = $specialPositive;
+        $state['turn_roll_count'] = ($state['turn_roll_count'] ?? 0) + 1;
+        $state['hot_dice'] = false;
+
+        if ($isBust) {
+            $state['phase'] = 'bust';
+            $state['is_bust'] = true;
+            $state['pending_score'] = 0;
+            $state['can_roll'] = false;
+            $state['can_hold'] = false;
+            $state['can_bank'] = false;
         } else {
-            // No scoring combo - this is a BUST
-            $turnState['can_hold'] = false;
-            $turnState['can_bank'] = false;
-            $turnState['can_roll'] = false;
-            $turnState['is_bust'] = true;
+            $state['phase'] = 'hold';
+            $state['can_roll'] = false;
+            $state['can_hold'] = true;
+            $state['can_bank'] = false;
         }
 
-        $player->update(['turn_state' => $turnState]);
+        $player->update(['turn_state' => $state]);
 
-        return $turnState;
+        return $state;
     }
 
     /**
-     * Update turn state after holding dice
-     *
-     * @param GamePlayer $player
-     * @param array $heldDiceValues Values of dice being held
-     * @param array $heldDiceIndices Indices of dice being held
-     * @param int $scoreFromHeldDice Points from the held dice
-     * @return array Updated turn state
+     * @param  int[]  $indices  positions being set aside (all from the last throw)
      */
-    public function afterHold(GamePlayer $player, array $heldDiceValues, array $heldDiceIndices, int $scoreFromHeldDice): array
+    public function afterHold(GamePlayer $player, array $state, array $indices, int $points): array
     {
-        $turnState = $player->turn_state ?? [];
+        $held = array_values(array_unique(array_merge($state['held_indices'] ?? [], $indices)));
+        sort($held);
+        $available = array_values(array_diff(range(0, RollUpGameType::REGULAR_DICE - 1), $held));
 
-        // Add held dice to the set
-        $currentHeld = $turnState['held_dice'] ?? [];
-        $currentHeldIndices = $turnState['held_dice_indices'] ?? [];
+        $state['held_indices'] = $held;
+        $state['held_dice'] = $this->valuesAt($state['dice'], $held);
+        $state['available_indices'] = $available;
+        $state['available_dice'] = $this->valuesAt($state['dice'], $available);
+        $state['pending_score'] = ($state['pending_score'] ?? 0) + $points;
+        $state['hot_dice'] = count($held) === RollUpGameType::REGULAR_DICE;
+        $state['phase'] = 'decide';
+        $state['can_hold'] = false;
+        $state['can_bank'] = true;
+        $state['can_roll'] = true; // the remaining dice, or all six again on hot dice
 
-        $turnState['held_dice'] = array_merge($currentHeld, $heldDiceValues);
-        $turnState['held_dice_indices'] = array_merge($currentHeldIndices, $heldDiceIndices);
+        $player->update(['turn_state' => $state]);
 
-        // Add to pending score
-        $turnState['pending_score'] = ($turnState['pending_score'] ?? 0) + $scoreFromHeldDice;
-
-        // Remove held dice from available
-        $available = $turnState['available_dice'] ?? [];
-        foreach ($heldDiceIndices as $index) {
-            if (isset($available[$index])) {
-                unset($available[$index]);
-            }
-        }
-        $turnState['available_dice'] = array_values($available);
-
-        // Update action availability
-        $turnState['can_hold'] = false;
-        $turnState['can_bank'] = true;   // Can now bank the pending score
-        $turnState['can_roll'] = count($turnState['available_dice']) > 0; // Can roll if dice remain
-
-        // Special case: If all 6 dice scored ("hot dice"), allow rolling all 6 again
-        if (count($turnState['held_dice']) >= 6 && count($turnState['available_dice']) === 0) {
-            $turnState['available_dice'] = [];  // Will roll all 6 fresh dice
-            $turnState['can_roll'] = true;
-            $turnState['hot_dice'] = true;
-        }
-
-        $player->update(['turn_state' => $turnState]);
-
-        return $turnState;
+        return $state;
     }
 
-    /**
-     * Bank the pending score and end the turn
-     *
-     * @param GamePlayer $player
-     * @return array Final turn state
-     */
-    public function bankScore(GamePlayer $player): array
+    public function afterBank(GamePlayer $player, array $state): array
     {
-        $turnState = $player->turn_state ?? [];
-        $turnState['is_banked'] = true;
-        $turnState['can_hold'] = false;
-        $turnState['can_bank'] = false;
-        $turnState['can_roll'] = false;
+        $state['phase'] = 'banked';
+        $state['is_banked'] = true;
+        $state['pending_score'] = 0;
+        $state['can_roll'] = false;
+        $state['can_hold'] = false;
+        $state['can_bank'] = false;
 
-        $player->update(['turn_state' => $turnState]);
+        $player->update(['turn_state' => $state]);
 
-        return $turnState;
+        return $state;
     }
 
-    /**
-     * Handle a bust (no scoring dice on roll)
-     *
-     * @param GamePlayer $player
-     * @return array Final turn state
-     */
-    public function bustTurn(GamePlayer $player): array
+    public function isTurnComplete(array $state): bool
     {
-        $turnState = $player->turn_state ?? [];
-        $turnState['is_bust'] = true;
-        $turnState['pending_score'] = 0;  // Lose all pending points
-        $turnState['can_hold'] = false;
-        $turnState['can_bank'] = false;
-        $turnState['can_roll'] = false;
-
-        $player->update(['turn_state' => $turnState]);
-
-        return $turnState;
+        return ($state['is_banked'] ?? false) || ($state['is_bust'] ?? false);
     }
 
-    /**
-     * Check if player's turn is complete (either banked or busted)
-     *
-     * @param array $turnState
-     * @return bool
-     */
-    public function isTurnComplete(array $turnState): bool
-    {
-        return ($turnState['is_banked'] ?? false) || ($turnState['is_bust'] ?? false);
-    }
-
-    /**
-     * Get number of dice to roll (based on available dice)
-     *
-     * @param GamePlayer $player
-     * @return int Number of dice to roll
-     */
-    public function getDiceCountToRoll(GamePlayer $player): int
-    {
-        $turnState = $player->turn_state ?? [];
-        $availableDice = $turnState['available_dice'] ?? [];
-
-        // If no dice available but can roll (hot dice scenario), roll all 6
-        if (empty($availableDice) && ($turnState['can_roll'] ?? false)) {
-            return 6;
-        }
-
-        // Otherwise, roll the available dice
-        return count($availableDice);
-    }
-
-    /**
-     * Validate that selected dice can be held (are a valid scoring combo)
-     *
-     * @param array $selectedDice
-     * @param array $availableDice
-     * @return bool
-     */
-    public function canHoldDice(array $selectedDice, array $availableDice): bool
-    {
-        // Check all selected dice are in available dice
-        $availableCopy = $availableDice;
-        foreach ($selectedDice as $die) {
-            $key = array_search($die, $availableCopy);
-            if ($key === false) {
-                return false;  // Die not available
-            }
-            unset($availableCopy[$key]);
-        }
-
-        // TODO: Add validation that selected dice form a valid scoring combo
-        // For now, just check they're all available
-        return true;
-    }
-
-    /**
-     * Clear turn state (at end of round)
-     *
-     * @param GamePlayer $player
-     * @return void
-     */
     public function clearTurnState(GamePlayer $player): void
     {
         $player->update(['turn_state' => null]);
     }
 
-    /**
-     * Get current turn state for a player
-     *
-     * @param GamePlayer $player
-     * @return array|null
-     */
     public function getTurnState(GamePlayer $player): ?array
     {
         return $player->turn_state;
+    }
+
+    private function valuesAt(array $dice, array $positions): array
+    {
+        return array_values(array_map(fn ($i) => $dice[$i] ?? null, $positions));
     }
 }

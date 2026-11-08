@@ -10,8 +10,15 @@
         </testsuite>
     </testsuites>
     <php>
-        <env name="APP_ENV" value="testing"/>
-        <env name="CACHE_DRIVER" value="array"/>
-        <env name="QUEUE_CONNECTION" value="sync"/>
+        <env name="APP_ENV" value="testing" force="true"/>
+        <env name="CACHE_DRIVER" value="array" force="true"/>
+        <env name="QUEUE_CONNECTION" value="sync" force="true"/>
+        <!-- Feature tests migrate:fresh this database. It must be a throwaway
+             database whose name ends in _testing (create it once with
+             `createdb -h 127.0.0.1 -U postgres rollup_testing`); TestCase
+             refuses to run against anything else. -->
+        <env name="DB_CONNECTION" value="pgsql" force="true"/>
+        <env name="DB_DATABASE" value="rollup_testing" force="true"/>
+        <env name="API_KEY_OPENLUXE" value="test-api-key" force="true"/>
     </php>
 </phpunit>

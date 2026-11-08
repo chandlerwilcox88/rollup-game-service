@@ -16,8 +16,7 @@ class ExampleTest extends TestCase
     {
         $this->get('/');
 
-        $this->assertEquals(
-            $this->app->version(), $this->response->getContent()
-        );
+        $this->assertResponseOk();
+        $this->seeJson(['service' => 'Roll Up Game Service']);
     }
 }

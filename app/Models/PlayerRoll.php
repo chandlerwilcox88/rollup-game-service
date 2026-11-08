@@ -26,6 +26,8 @@ class PlayerRoll extends Model
         'action_type',
         'target_player_id',
         'rolled_at',
+        'rolled_indices',
+        'nonces',
     ];
 
     protected $casts = [
@@ -46,6 +48,8 @@ class PlayerRoll extends Model
         'is_bust' => 'boolean',
         'target_player_id' => 'integer',
         'rolled_at' => 'datetime',
+        'rolled_indices' => 'array',
+        'nonces' => 'array',
     ];
 
     /**

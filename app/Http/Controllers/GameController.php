@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Exceptions\GameRuleException;
 use App\Models\Game;
 use App\Models\GameType;
 use App\Models\RoomGameHistory;
@@ -11,6 +12,7 @@ use App\Services\GameTypeRegistry;
 use App\Services\ProvablyFairService;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\Log;
 use Laravel\Lumen\Routing\Controller as BaseController;
 
 class GameController extends BaseController
@@ -129,106 +131,68 @@ class GameController extends BaseController
             'data' => 'nullable|array',
         ]);
 
+        $game = \Illuminate\Support\Str::isUuid($gameId) ? Game::find($gameId) : null;
+        if (!$game) {
+            return $this->ruleError(GameRuleException::notFound('Game not found', 'game_not_found'));
+        }
+
+        $userId = (int) $request->input('user_id');
+        $action = $request->input('action');
+        $data = $request->input('data', []) ?? [];
+
         try {
-            $game = Game::findOrFail($gameId);
-
-            if ($game->status !== 'in_progress') {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Game is not in progress',
-                ], 400);
-            }
-
-            $userId = $request->input('user_id');
-            $action = $request->input('action');
-            $data = $request->input('data', []);
-
             if ($action === 'roll') {
                 $result = $this->gameService->rollDice($game, $userId);
-
-                return response()->json([
-                    'success' => true,
-                    'message' => 'Dice rolled successfully',
-                    'data' => [
-                        'action' => 'roll',
-                        'round' => $game->current_round,
-                        ...$result,
-                    ],
-                ]);
-            }
-
-            if ($action === 'hold') {
-                // Validate hold data
+                $message = $result['is_bust'] ? 'Bust: no scoring dice, the turn is over' : 'Dice rolled successfully';
+            } elseif ($action === 'hold') {
                 if (!isset($data['held_dice_indices']) || !is_array($data['held_dice_indices'])) {
-                    return response()->json([
-                        'success' => false,
-                        'message' => 'held_dice_indices is required and must be an array',
-                    ], 400);
+                    throw GameRuleException::invalid('held_dice_indices is required and must be an array of die positions (0-5)', 'invalid_index');
                 }
-
                 $result = $this->gameService->holdDice($game, $userId, $data['held_dice_indices']);
-
-                return response()->json([
-                    'success' => true,
-                    'message' => 'Dice held successfully',
-                    'data' => [
-                        'action' => 'hold',
-                        'round' => $game->current_round,
-                        ...$result,
-                    ],
-                ]);
-            }
-
-            if ($action === 'bank') {
-                // For negative scores, need target_player_id
-                $targetPlayerId = $data['target_player_id'] ?? null;
-
+                $message = 'Dice held successfully';
+            } else {
+                $targetPlayerId = isset($data['target_player_id']) ? (int) $data['target_player_id'] : null;
                 $result = $this->gameService->bankPoints($game, $userId, $targetPlayerId);
-
-                return response()->json([
-                    'success' => true,
-                    'message' => 'Points banked successfully',
-                    'data' => [
-                        'action' => 'bank',
-                        'round' => $game->current_round,
-                        ...$result,
-                    ],
-                ]);
+                $message = 'Points banked successfully';
             }
 
             return response()->json([
-                'success' => false,
-                'message' => 'Invalid action',
-            ], 400);
-        } catch (\Exception $e) {
-            // Check if this is a validation/client error
-            $clientErrors = [
-                'Player has already rolled in this round',
-                'Player not found',
-                'Invalid player',
-                'Not your turn',
-                'Cannot hold dice at this time',
-                'Cannot bank at this time',
-                'Invalid dice index',
-                'Must select at least one die',
-                'Must select a player to assign negative points',
-                'Cannot assign negative points to yourself',
-            ];
-
-            $isClientError = false;
-            foreach ($clientErrors as $errorMsg) {
-                if (str_contains($e->getMessage(), $errorMsg)) {
-                    $isClientError = true;
-                    break;
-                }
-            }
+                'success' => true,
+                'message' => $message,
+                'data' => [
+                    'action' => $action,
+                    'round' => $game->current_round, // the round this action was played in
+                    ...$result,
+                    // the round the game is in now (advances when the last player banks or busts)
+                    'current_round' => $game->fresh()->current_round,
+                ],
+            ]);
+        } catch (GameRuleException $e) {
+            return $this->ruleError($e);
+        } catch (\Throwable $e) {
+            Log::error('Roll Up action failed', [
+                'game_id' => $gameId,
+                'user_id' => $userId,
+                'action' => $action,
+                'error' => $e->getMessage(),
+            ]);
 
             return response()->json([
                 'success' => false,
                 'message' => 'Action failed',
                 'error' => $e->getMessage(),
-            ], $isClientError ? 400 : 500);
+            ], 500);
         }
+    }
+
+    private function ruleError(GameRuleException $e): JsonResponse
+    {
+        return response()->json([
+            'success' => false,
+            'message' => 'Action rejected',
+            'error' => $e->getMessage(),
+            'code' => $e->errorCode,
+        ], $e->status);
     }
 
     /**
@@ -250,6 +214,8 @@ class GameController extends BaseController
                 'success' => true,
                 'data' => $results,
             ]);
+        } catch (GameRuleException $e) {
+            return $this->ruleError($e);
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
@@ -287,6 +253,8 @@ class GameController extends BaseController
                 'success' => true,
                 'data' => $verification,
             ]);
+        } catch (GameRuleException $e) {
+            return $this->ruleError($e);
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,

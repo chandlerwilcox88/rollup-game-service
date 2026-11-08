@@ -357,6 +357,41 @@ class GameRoomController extends Controller
 
 ---
 
+## Roll Up Rules & Action Contract
+
+`POST /api/games/{id}/action` with `{user_id, action: roll|hold|bank, data}`. Every player plays one turn per
+round, all at the same time; a round closes when every player has banked or busted, and the game ends after
+`settings.rounds` rounds. Die indices are **positions**: 0-5 regular dice, 6 the +/- special die.
+
+- **roll** — throws every regular die that is not held (all six again after hot dice). The special die is thrown
+  only on the first roll of the turn (1-4 = +, 5-6 = -). A throw with no scoring die is a **bust**: the turn ends
+  and the pot is lost. A roll never changes any total.
+- **hold** `data.held_dice_indices: [positions]` — one hold per throw, only dice from the last throw, and every
+  held die must score. The points go into the turn pot.
+- **bank** — ends the turn. On + the pot is added to your total once; on - send `data.target_player_id` (a rival's
+  user id) and the pot is subtracted from them (never below 0).
+
+Roll response `data`: `dice` (all 7 values in position order — animate onto exactly these), `held` (7 booleans),
+`held_indices`, `rolled_indices`, `special_die`, `special_die_positive`, `is_bust`, `pot_lost`, `pending_score`,
+`best_combination` (`name` is `none` on a bust), `best_hold {indices, values, points}`, `player_total_score`,
+`nonce` (base), `nonces` (per position, `null` for dice not thrown), `fairness {server_seed_hash, client_seed,
+base_nonce, nonces, algorithm}`, `turn_state`, `round_advanced`, `game_status`, `round`, `current_round`.
+Hold returns `held_indices, held_dice, score_added, pending_score, hot_dice, turn_state`; bank returns
+`banked_score, special_die_positive, target_player, player_total_score, turn_state, round_advanced, game_status`.
+
+`turn_state.phase` is one of `roll`, `hold`, `decide`, `bust`, `banked`, alongside `can_roll`, `can_hold`,
+`can_bank`, `pending_score`, `dice`, `held_indices`, `available_indices` and `round`. It is reset for every player
+when a round starts.
+
+Rejected actions return `{success:false, error, code}`: 404 `player_not_in_game`/`game_not_found`; 409
+`game_not_in_progress`, `turn_completed`, `must_hold_first`, `cannot_hold`, `cannot_bank`; 422 `empty_hold`,
+`invalid_index`, `non_scoring_hold`, `target_required`, `target_self`, `target_not_in_game`.
+
+**Fairness:** a player's k-th throw in the game uses nonces `k*7 .. k*7+6`, and the die at position p uses
+`k*7+p`, so no nonce is ever reused. After the game, `GET /server-seed` reveals the seed (its SHA-256 equals
+the `server_seed_hash` published at creation) and `POST /verify {user_id, round_number}` recomputes every
+thrown die of every roll in that round.
+
 ## API Endpoints Reference
 
 ### Game Type Discovery
